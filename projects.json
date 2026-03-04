@@ -1,0 +1,17 @@
+{
+  "projects": [
+    {
+      "name": "My Project",
+      "pathRegex": "my-project",
+      "milestones": {
+        "M1": {
+          "name": "Auth module",
+          "checklist": [
+            "Login flow works end to end",
+            "Token refresh handled correctly"
+          ]
+        }
+      }
+    }
+  ]
+}
