@@ -81,7 +81,10 @@ bench intervene "Had to fix Unistyles v3 syntax — agent used v2 API"
 
 # 4. When the agent reports token usage (call once per agent session)
 #    If a milestone spans multiple sessions, call this multiple times — totals accumulate
-bench tokens --in 12000 --out 800
+#    Use --in for input tokens, --out for output tokens, --all for combined total
+bench tokens --in 12000
+bench tokens --out 800
+bench tokens --all 45000
 
 # 5. Close the run — walks through the done-when checklist then qualitative scores
 bench end
@@ -103,7 +106,7 @@ bench export
 | `bench end` | Close active run — interactive checklist + 7 qualitative scores |
 | `bench log` | Record one agent turn/message |
 | `bench intervene "<note>"` | Record a human intervention with timestamp |
-| `bench tokens --in <n> --out <n>` | Record token usage — call once per agent session |
+| `bench tokens --in <n> \| --out <n> \| --all <n>` | Record token usage — call once per agent session |
 | `bench status` | Show active run details |
 | `bench report` | Summary table of all completed runs |
 | `bench export` | Write CSV to `~/.bench/exports/` |
@@ -121,7 +124,7 @@ Any string is valid — `M2`, `auth-module`, `SPRINT-4`, `phase-1`. Milestone ID
 If a milestone requires more than one agent session (e.g. context window ran out mid-task), just call `bench tokens` again for each session. Totals accumulate correctly and the report shows how many token recordings contributed to the total:
 
 ```
-Tokens: 35.4k in / 9.9k out  (3 token recordings)
+Tokens: 45.3k  (3 token recordings)
 ```
 
 ---
@@ -157,4 +160,45 @@ Tokens: 35.4k in / 9.9k out  (3 token recordings)
 All runs appended to `~/.bench/all-runs.jsonl` — one JSON object per line.
 Individual run files at `~/.bench/<agent-slug>/<milestone>.json`.
 CSV exports at `~/.bench/exports/export-<timestamp>.csv`.
+
+### Run object schema
+
+```json
+{
+  "agent": "opencode",
+  "milestone": "M1",
+  "milestoneName": "Settings Screen",
+  "projectName": "Claudia",
+  "startTime": 1773125260456,
+  "startTs": "2026-03-10T06:47:40.456Z",
+  "worktree": "/path/to/project",
+  "branch": "claudia-codex",
+  "repo": "pandeiro/Claudia",
+  "endTime": 1773129063616,
+  "endTs": "2026-03-10T07:51:03.617Z",
+  "durationMs": 3803160,
+  "turns": 0,
+  "interventions": [{ "ts": "2026-03-10T07:05:45.853Z", "note": "..." }],
+  "tokenLog": [
+    { "ts": "2026-03-10T06:48:21.354Z", "in": 36000, "out": 258000 },
+    { "ts": "2026-03-10T07:50:13.273Z", "in": 114000, "out": 0 },
+    { "ts": "2026-03-10T07:50:45.000Z", "total": 45000 }
+  ],
+  "totalTokensIn": 150000,
+  "totalTokensOut": 258000,
+  "totalTokens": 45000,
+  "checklistResults": { "App launches without errors": "pass", ... },
+  "qualitative": { "specAdherence": 4, "themeUsage": 4, ... },
+  "notes": "needed a hand",
+  "status": "complete",
+  "checklistSummary": { "passed": 1, "failed": 0, "skipped": 6, "total": 7 }
+}
+```
+
+**Token fields:**
+- `tokenLog` — array of token recording sessions
+- `totalTokensIn` — sum of all `--in` values recorded
+- `totalTokensOut` — sum of all `--out` values recorded
+- `totalTokens` — sum of all `--all` (combined) values recorded
+- Report and status display the combined total: `totalTokensIn + totalTokensOut + totalTokens`
 

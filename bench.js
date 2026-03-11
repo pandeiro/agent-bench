@@ -17,7 +17,7 @@
  *   bench end                           close run (checklist + scores)
  *   bench log                           record one agent turn/message
  *   bench intervene "<note>"            record a human intervention
- *   bench tokens --in <n> --out <n>     record token usage for a call
+ *   bench tokens --in <n> | --out <n> | --all <n>  record token usage
  *   bench status                        show active run
  *   bench report                        summary table of all runs
  *   bench export                        write CSV to ~/.bench/exports/
@@ -164,9 +164,10 @@ async function start(args) {
     endTime: null, endTs: null, durationMs: null,
     turns: 0,
     interventions: [],
-    tokenLog: [],        // [{ ts, in, out }]
+    tokenLog: [],        // [{ ts, in, out, total? }]
     totalTokensIn: 0,
     totalTokensOut: 0,
+    totalTokens: 0,       // combined tokens when --all used
     checklistResults: {},
     qualitative: {},
     notes: '',
@@ -183,7 +184,7 @@ async function start(args) {
   p('')
   p(d('  bench log                            record a turn'))
   p(d('  bench intervene "<note>"             record an intervention'))
-  p(d('  bench tokens --in <n> --out <n>      record token usage'))
+  p(d('  bench tokens --in <n> | --out <n> | --all <n>  record token usage'))
   p(d('  bench end                            close with checklist + scores'))
   p('')
 }
@@ -209,28 +210,34 @@ function intervene(args) {
 }
 
 function tokens(args) {
-  // bench tokens --in 12000 --out 800
-  // bench tokens 5000              (treated as out for backwards compat)
-  let tokIn = 0, tokOut = 0
+  // bench tokens --in <n>           record input tokens only
+  // bench tokens --out <n>           record output tokens only
+  // bench tokens --all <n>           record combined tokens (no breakdown)
+  let tokIn = 0, tokOut = 0, tokTotal = 0
   const inIdx = args.indexOf('--in')
   const outIdx = args.indexOf('--out')
-  if (inIdx !== -1)  tokIn  = parseInt(args[inIdx + 1])  || 0
-  if (outIdx !== -1) tokOut = parseInt(args[outIdx + 1]) || 0
-  if (inIdx === -1 && outIdx === -1) {
-    // bare number — treat as output tokens
-    tokOut = parseInt(args[0]) || 0
-  }
-  if (!tokIn && !tokOut) { p(r('Usage: bench tokens --in <n> --out <n>')); process.exit(1) }
+  const allIdx = args.indexOf('--all')
+  if (inIdx !== -1)  tokIn   = parseInt(args[inIdx + 1])  || 0
+  if (outIdx !== -1) tokOut  = parseInt(args[outIdx + 1]) || 0
+  if (allIdx !== -1) tokTotal = parseInt(args[allIdx + 1]) || 0
+  if (!tokIn && !tokOut && !tokTotal) { p(r('Usage: bench tokens --in <n> | --out <n> | --all <n>')); process.exit(1) }
 
   if (!fs.existsSync(stateFile())) { p(r('No active run.')); process.exit(1) }
   const s = readJSON(stateFile())
-  s.tokenLog.push({ ts: ts(), in: tokIn, out: tokOut })
-  s.totalTokensIn  += tokIn
-  s.totalTokensOut += tokOut
+  s.totalTokens = s.totalTokens ?? 0
+  s.tokenLog.push({ ts: ts(), in: tokIn, out: tokOut, total: tokTotal })
+  s.totalTokensIn   += tokIn
+  s.totalTokensOut  += tokOut
+  s.totalTokens     += tokTotal
   writeJSON(stateFile(), s)
   writeJSON(runPath(s.agent, s.milestone), s)
   const sessionNum = s.tokenLog.length
-  p(d(`  tokens session ${sessionNum}: +${tokIn.toLocaleString()} in / +${tokOut.toLocaleString()} out  (running totals: ${s.totalTokensIn.toLocaleString()} in / ${s.totalTokensOut.toLocaleString()} out)`))
+  const total = s.totalTokensIn + s.totalTokensOut + s.totalTokens
+  if (tokTotal) {
+    p(d(`  tokens session ${sessionNum}: +${tokTotal.toLocaleString()} total  (running total: ${total.toLocaleString()})`))
+  } else {
+    p(d(`  tokens session ${sessionNum}: +${tokIn.toLocaleString()} in / +${tokOut.toLocaleString()} out  (running total: ${total.toLocaleString()})`))
+  }
 }
 
 async function end() {
@@ -243,7 +250,8 @@ async function end() {
   p(b(`■  ${s.agent} — ${s.milestone}${def ? ': ' + def.name : ''}`))
   p(d(`   Started: ${s.startTs}`))
   p(d(`   Elapsed: ${fmt(now() - s.startTime)}`))
-  p(d(`   Turns: ${s.turns}  |  Interventions: ${s.interventions.length}  |  Tokens in: ${s.totalTokensIn.toLocaleString()}  out: ${s.totalTokensOut.toLocaleString()}`))
+  const endTotal = (s.totalTokensIn ?? 0) + (s.totalTokensOut ?? 0) + (s.totalTokens ?? 0)
+  p(d(`   Turns: ${s.turns}  |  Interventions: ${s.interventions.length}  |  Tokens: ${endTotal.toLocaleString()}`))
   p('')
 
   // Checklist — defined items if project config found, freeform otherwise
@@ -325,7 +333,8 @@ function status() {
     p(d(`  ${s.repo ?? path.basename(s.worktree ?? '.')}  ${s.branch ? '@ ' + s.branch : ''}${s.projectName ? '  [' + s.projectName + ']' : ''}`))
     p(d(`  Started: ${s.startTs}  |  Elapsed: ${fmt(now() - s.startTime)}`))
     p(d(`  Turns: ${s.turns}  |  Interventions: ${s.interventions.length}`))
-    p(d(`  Tokens in: ${s.totalTokensIn.toLocaleString()}  out: ${s.totalTokensOut.toLocaleString()}`))
+    const activeTotal = (s.totalTokensIn ?? 0) + (s.totalTokensOut ?? 0) + (s.totalTokens ?? 0)
+    p(d(`  Tokens: ${activeTotal.toLocaleString()}  (in: ${s.totalTokensIn ?? 0} / out: ${s.totalTokensOut ?? 0} / total: ${s.totalTokens ?? 0})`))
     if (s.interventions.length) {
       p(d('  Interventions:'))
       s.interventions.forEach(i => p(d(`    [${i.ts}] ${i.note}`)))
@@ -348,14 +357,14 @@ function report() {
   p(b('CLAUDIA BENCHMARK REPORT'))
   p(d('─'.repeat(100)))
 
-  const W = { agent:20, dur:9, turns:7, int:5, tokIn:9, tokOut:9, chk:7, spec:5, theme:6, auto:5, halu:5, leg:5, sat:4 }
+  const W = { agent:20, dur:9, turns:7, int:5, tok:10, chk:7, spec:5, theme:6, auto:5, halu:5, leg:5, sat:4 }
 
   for (const [ms, msRuns] of Object.entries(byMs).sort()) {
     p('')
     p(b(`${ms}${msRuns[0]?.milestoneName && msRuns[0].milestoneName !== ms ? ' — ' + msRuns[0].milestoneName : ''}`))
     const hdr = [
       'Agent'.padEnd(W.agent), 'Time'.padEnd(W.dur), 'Turns'.padEnd(W.turns),
-      'Int'.padEnd(W.int), 'Tok-in'.padEnd(W.tokIn), 'Tok-out'.padEnd(W.tokOut),
+      'Int'.padEnd(W.int), 'Tokens'.padEnd(W.tok),
       'Check'.padEnd(W.chk), 'Spec'.padEnd(W.spec), 'Theme'.padEnd(W.theme),
       'Auto'.padEnd(W.auto), 'Halu'.padEnd(W.halu), 'Legib'.padEnd(W.leg), 'Sat'.padEnd(W.sat),
     ].join(' ')
@@ -365,13 +374,13 @@ function report() {
     for (const run of msRuns) {
       const q = run.qualitative ?? {}
       const chk = run.checklistSummary ? `${run.checklistSummary.passed}/${run.checklistSummary.total}` : '–'
+      const runTotal = (run.totalTokensIn ?? 0) + (run.totalTokensOut ?? 0) + (run.totalTokens ?? 0)
       const row = [
         run.agent.substring(0, W.agent-1).padEnd(W.agent),
         fmt(run.durationMs).padEnd(W.dur),
         String(run.turns ?? '–').padEnd(W.turns),
         String(run.interventions?.length ?? '–').padEnd(W.int),
-        (run.totalTokensIn  ? (run.totalTokensIn /1000).toFixed(1)+'k'  : '–').padEnd(W.tokIn),
-        (run.totalTokensOut ? (run.totalTokensOut/1000).toFixed(1)+'k' : '–').padEnd(W.tokOut),
+        (runTotal ? (runTotal/1000).toFixed(1)+'k' : '–').padEnd(W.tok),
         chk.padEnd(W.chk),
         String(q.specAdherence     ?? '–').padEnd(W.spec),
         String(q.themeUsage        ?? '–').padEnd(W.theme),
@@ -393,8 +402,7 @@ function report() {
     for (const agent of agents) {
       const ar = runs.filter(r => r.agent === agent)
       const totalMs   = ar.reduce((s,r) => s + (r.durationMs ?? 0), 0)
-      const totalIn   = ar.reduce((s,r) => s + (r.totalTokensIn  ?? 0), 0)
-      const totalOut  = ar.reduce((s,r) => s + (r.totalTokensOut ?? 0), 0)
+      const totalTokens= ar.reduce((s,r) => s + (r.totalTokensIn ?? 0) + (r.totalTokensOut ?? 0) + (r.totalTokens ?? 0), 0)
       const totalInt  = ar.reduce((s,r) => s + (r.interventions?.length ?? 0), 0)
       const totalTurns= ar.reduce((s,r) => s + (r.turns ?? 0), 0)
       const avg = (key) => {
@@ -404,7 +412,7 @@ function report() {
       p('')
       p(`  ${b(agent)}  ${d(`(${ar.length} milestones)`)}`)
       p(`    Time: ${fmt(totalMs)}  |  Turns: ${totalTurns}  |  Interventions: ${totalInt}`)
-      p(`    Tokens: ${(totalIn/1000).toFixed(1)}k in / ${(totalOut/1000).toFixed(1)}k out  (${ar.reduce((s,r)=>s+(r.tokenLog?.length??0),0)} token recordings)`)
+      p(`    Tokens: ${(totalTokens/1000).toFixed(1)}k  (${ar.reduce((s,r)=>s+(r.tokenLog?.length??0),0)} token recordings)`)
       p(`    Scores — Spec:${avg('specAdherence')} Theme:${avg('themeUsage')} Auto:${avg('autonomy')} Halu:${avg('hallucination')} Legib:${avg('legibilityForNext')} Sat:${avg('satisfaction')}`)
     }
   }
@@ -420,7 +428,7 @@ function exportCSV() {
     'agent','milestone','milestoneName','projectName','status',
     'repo','branch','worktree',
     'startTs','endTs','durationMs','durationFormatted',
-    'turns','interventionCount','tokenSessions','totalTokensIn','totalTokensOut',
+    'turns','interventionCount','tokenSessions','totalTokensIn','totalTokensOut','totalTokens',
     'checklistPassed','checklistFailed','checklistSkipped','checklistTotal',
     'specAdherence','themeUsage','codeQuality','autonomy',
     'hallucination','legibilityForNext','satisfaction',
@@ -432,7 +440,7 @@ function exportCSV() {
     `"${r.repo ?? ''}"`, `"${r.branch ?? ''}"`, `"${r.worktree ?? ''}"`,
     r.startTs, r.endTs, r.durationMs ?? '', fmt(r.durationMs),
     r.turns ?? 0, r.interventions?.length ?? 0,
-    r.tokenLog?.length ?? 0, r.totalTokensIn ?? 0, r.totalTokensOut ?? 0,
+    r.tokenLog?.length ?? 0, r.totalTokensIn ?? 0, r.totalTokensOut ?? 0, r.totalTokens ?? 0,
     r.checklistSummary?.passed ?? '', r.checklistSummary?.failed ?? '',
     r.checklistSummary?.skipped ?? '', r.checklistSummary?.total ?? '',
     r.qualitative?.specAdherence ?? '', r.qualitative?.themeUsage ?? '',
@@ -458,7 +466,7 @@ function help() {
   p('  bench end                              close run (interactive checklist + scores)')
   p('  bench log                              record one agent turn/message')
   p('  bench intervene "<note>"               record a human intervention')
-  p('  bench tokens --in <n> --out <n>        record token usage')
+  p('  bench tokens --in <n> | --out <n> | --all <n>  record token usage')
   p('  bench status                           show active run')
   p('  bench report                           summary table of all completed runs')
   p('  bench export                           write CSV to ~/.bench/exports/')
