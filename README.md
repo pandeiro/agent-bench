@@ -76,6 +76,10 @@ bench start "Claude Code" M2
 # 2. After each agent response
 bench log
 
+# 2a. When you step away (grab coffee, lunch, etc) — time is excluded from duration
+bench pause   # pause
+bench pause  # resume
+
 # 3. When you have to step in and correct something
 bench intervene "Had to fix Unistyles v3 syntax — agent used v2 API"
 
@@ -105,6 +109,7 @@ bench export
 | `bench start <agent> <milestone>` | Begin a milestone run |
 | `bench end` | Close active run — interactive checklist + 7 qualitative scores |
 | `bench log` | Record one agent turn/message |
+| `bench pause` | Toggle pause/resume — excludes time from duration |
 | `bench intervene "<note>"` | Record a human intervention with timestamp |
 | `bench tokens --in <n> \| --out <n> \| --all <n>` | Record token usage — call once per agent session |
 | `bench status` | Show active run details |
@@ -138,6 +143,7 @@ Tokens: 45.3k  (3 token recordings)
 
 **One command per event:**
 - `bench log` — turn/message count
+- `bench pause` — toggle pause/resume (time away is excluded from duration)
 - `bench intervene` — timestamped intervention log
 - `bench tokens` — token counts, accumulated across sessions
 
@@ -177,8 +183,11 @@ CSV exports at `~/.bench/exports/export-<timestamp>.csv`.
   "endTime": 1773129063616,
   "endTs": "2026-03-10T07:51:03.617Z",
   "durationMs": 3803160,
+  "activeDurationMs": 3500000,
+  "totalPauseMs": 303160,
   "turns": 0,
   "interventions": [{ "ts": "2026-03-10T07:05:45.853Z", "note": "..." }],
+  "pauses": [{ "startTs": "...", "endTs": "...", "durationMs": 303160 }],
   "tokenLog": [
     { "ts": "2026-03-10T06:48:21.354Z", "in": 36000, "out": 258000 },
     { "ts": "2026-03-10T07:50:13.273Z", "in": 114000, "out": 0 },
@@ -201,4 +210,10 @@ CSV exports at `~/.bench/exports/export-<timestamp>.csv`.
 - `totalTokensOut` — sum of all `--out` values recorded
 - `totalTokens` — sum of all `--all` (combined) values recorded
 - Report and status display the combined total: `totalTokensIn + totalTokensOut + totalTokens`
+
+**Pause fields:**
+- `pauses` — array of pause sessions: `[{ startTs, endTs, durationMs }]`
+- `currentPauseStart` — timestamp when pause started (present if currently paused)
+- `activeDurationMs` — wall clock time minus pause time (actual agent working time)
+- `totalPauseMs` — sum of all pause durations
 
