@@ -16,6 +16,7 @@
  *   bench start <agent> <milestone>     begin a milestone run
  *   bench end                           close run (checklist + scores)
  *   bench log                           record one agent turn/message
+ *   bench pause                         toggle pause/resume (excludes time from duration)
  *   bench intervene "<note>"            record a human intervention
  *   bench tokens --in <n> | --out <n> | --all <n>  record token usage
  *   bench status                        show active run
@@ -164,6 +165,8 @@ async function start(args) {
     endTime: null, endTs: null, durationMs: null,
     turns: 0,
     interventions: [],
+    pauses: [],           // [{ startTs, endTs, durationMs }]
+    currentPauseStart: null,
     tokenLog: [],        // [{ ts, in, out, total? }]
     totalTokensIn: 0,
     totalTokensOut: 0,
@@ -183,15 +186,53 @@ async function start(args) {
   p(d(`   ${ctx.repo ?? path.basename(ctx.cwd)}  ${ctx.branch ? '@ ' + ctx.branch : '(no git branch)'}${project ? '  [' + project.name + ']' : ''}`))
   p('')
   p(d('  bench log                            record a turn'))
+  p(d('  bench pause                         toggle pause/resume (excludes time from duration)'))
   p(d('  bench intervene "<note>"             record an intervention'))
   p(d('  bench tokens --in <n> | --out <n> | --all <n>  record token usage'))
   p(d('  bench end                            close with checklist + scores'))
   p('')
 }
 
+function pause(args) {
+  if (!fs.existsSync(stateFile())) { p(r('No active run.')); process.exit(1) }
+  const s = readJSON(stateFile())
+
+  if (s.currentPauseStart) {
+    const pauseEnd = now()
+    const pauseDuration = pauseEnd - s.currentPauseStart
+    s.pauses.push({
+      startTs: s.currentPauseStartTs,
+      endTs: ts(),
+      durationMs: pauseDuration,
+    })
+    delete s.currentPauseStart
+    delete s.currentPauseStartTs
+    p(g(`  ▶ Resume — paused for ${fmt(pauseDuration)}`))
+  } else {
+    s.currentPauseStart = now()
+    s.currentPauseStartTs = ts()
+    p(y(`  ⏸ Paused — ${ts()}`))
+  }
+
+  writeJSON(stateFile(), s)
+  writeJSON(runPath(s.agent, s.milestone), s)
+}
+
 function log() {
   if (!fs.existsSync(stateFile())) { p(r('No active run.')); process.exit(1) }
   const s = readJSON(stateFile())
+  if (s.currentPauseStart) {
+    const pauseEnd = now()
+    const pauseDuration = pauseEnd - s.currentPauseStart
+    s.pauses.push({
+      startTs: s.currentPauseStartTs,
+      endTs: ts(),
+      durationMs: pauseDuration,
+    })
+    delete s.currentPauseStart
+    delete s.currentPauseStartTs
+    p(g(`  ▶ Resume from log — paused for ${fmt(pauseDuration)}`))
+  }
   s.turns++
   writeJSON(stateFile(), s)
   writeJSON(runPath(s.agent, s.milestone), s)
@@ -203,6 +244,20 @@ function intervene(args) {
   if (!note) { p(r('Usage: bench intervene "<note>"')); process.exit(1) }
   if (!fs.existsSync(stateFile())) { p(r('No active run.')); process.exit(1) }
   const s = readJSON(stateFile())
+
+  if (s.currentPauseStart) {
+    const pauseEnd = now()
+    const pauseDuration = pauseEnd - s.currentPauseStart
+    s.pauses.push({
+      startTs: s.currentPauseStartTs,
+      endTs: ts(),
+      durationMs: pauseDuration,
+    })
+    delete s.currentPauseStart
+    delete s.currentPauseStartTs
+    p(g(`  ▶ Resume from intervene — paused for ${fmt(pauseDuration)}`))
+  }
+
   s.interventions.push({ ts: ts(), note })
   writeJSON(stateFile(), s)
   writeJSON(runPath(s.agent, s.milestone), s)
@@ -243,6 +298,20 @@ function tokens(args) {
 async function end() {
   if (!fs.existsSync(stateFile())) { p(r('No active run.')); process.exit(1) }
   const s = readJSON(stateFile())
+
+  if (s.currentPauseStart) {
+    const pauseEnd = now()
+    const pauseDuration = pauseEnd - s.currentPauseStart
+    s.pauses.push({
+      startTs: s.currentPauseStartTs,
+      endTs: ts(),
+      durationMs: pauseDuration,
+    })
+    delete s.currentPauseStart
+    delete s.currentPauseStartTs
+    p(g(`  ▶ Resume from end — paused for ${fmt(pauseDuration)}`))
+  }
+
   const project = loadProject(s.worktree ?? process.cwd())
   const def = getMilestoneDef(project, s.milestone)
 
@@ -307,7 +376,10 @@ async function end() {
   // Finalise
   s.endTime = now()
   s.endTs = ts()
-  s.durationMs = s.endTime - s.startTime
+  const totalPauseMs = (s.pauses ?? []).reduce((sum, p) => sum + (p.durationMs ?? 0), 0)
+  s.durationMs = s.endTime - s.startTime - totalPauseMs
+  s.activeDurationMs = s.durationMs  // Agent active time (excludes pauses)
+  s.totalPauseMs = totalPauseMs
   s.status = failed > 0 ? 'partial' : 'complete'
   const totalItems = Object.keys(s.checklistResults).length
   s.checklistSummary = { passed, failed, skipped, total: totalItems }
@@ -331,13 +403,19 @@ function status() {
     p('')
     p(b(`Active: ${s.agent} — ${s.milestone}${s.milestoneName !== s.milestone ? ': ' + s.milestoneName : ''}`))
     p(d(`  ${s.repo ?? path.basename(s.worktree ?? '.')}  ${s.branch ? '@ ' + s.branch : ''}${s.projectName ? '  [' + s.projectName + ']' : ''}`))
-    p(d(`  Started: ${s.startTs}  |  Elapsed: ${fmt(now() - s.startTime)}`))
-    p(d(`  Turns: ${s.turns}  |  Interventions: ${s.interventions.length}`))
+    const elapsed = now() - s.startTime
+    const totalPauseMs = (s.pauses ?? []).reduce((sum, p) => sum + (p.durationMs ?? 0), 0) + (s.currentPauseStart ? (now() - s.currentPauseStart) : 0)
+    p(d(`  Started: ${s.startTs}  |  Elapsed: ${fmt(elapsed)}  (active: ${fmt(elapsed - totalPauseMs)}, paused: ${fmt(totalPauseMs)})`))
+    p(d(`  Turns: ${s.turns}  |  Interventions: ${s.interventions.length}  |  Pauses: ${s.pauses?.length ?? 0}${s.currentPauseStart ? ' (currently paused)' : ''}`))
     const activeTotal = (s.totalTokensIn ?? 0) + (s.totalTokensOut ?? 0) + (s.totalTokens ?? 0)
     p(d(`  Tokens: ${activeTotal.toLocaleString()}  (in: ${s.totalTokensIn ?? 0} / out: ${s.totalTokensOut ?? 0} / total: ${s.totalTokens ?? 0})`))
     if (s.interventions.length) {
       p(d('  Interventions:'))
       s.interventions.forEach(i => p(d(`    [${i.ts}] ${i.note}`)))
+    }
+    if (s.pauses?.length) {
+      p(d('  Pauses:'))
+      s.pauses.forEach(p_ => p(d(`    ${p_.startTs} → ${p_.endTs} (${fmt(p_.durationMs)})`)))
     }
   }
   p('')
@@ -427,8 +505,8 @@ function exportCSV() {
   const headers = [
     'agent','milestone','milestoneName','projectName','status',
     'repo','branch','worktree',
-    'startTs','endTs','durationMs','durationFormatted',
-    'turns','interventionCount','tokenSessions','totalTokensIn','totalTokensOut','totalTokens',
+    'startTs','endTs','durationMs','activeDurationMs','totalPauseMs','durationFormatted',
+    'turns','interventionCount','pauseCount','totalPauseMs','tokenSessions','totalTokensIn','totalTokensOut','totalTokens',
     'checklistPassed','checklistFailed','checklistSkipped','checklistTotal',
     'specAdherence','themeUsage','codeQuality','autonomy',
     'hallucination','legibilityForNext','satisfaction',
@@ -438,8 +516,9 @@ function exportCSV() {
   const rows = runs.map(r => [
     `"${r.agent}"`, r.milestone, `"${r.milestoneName}"`, `"${r.projectName ?? ''}"`, r.status,
     `"${r.repo ?? ''}"`, `"${r.branch ?? ''}"`, `"${r.worktree ?? ''}"`,
-    r.startTs, r.endTs, r.durationMs ?? '', fmt(r.durationMs),
+    r.startTs, r.endTs, r.durationMs ?? '', r.activeDurationMs ?? '', r.totalPauseMs ?? '', fmt(r.durationMs),
     r.turns ?? 0, r.interventions?.length ?? 0,
+    r.pauses?.length ?? 0, r.totalPauseMs ?? 0,
     r.tokenLog?.length ?? 0, r.totalTokensIn ?? 0, r.totalTokensOut ?? 0, r.totalTokens ?? 0,
     r.checklistSummary?.passed ?? '', r.checklistSummary?.failed ?? '',
     r.checklistSummary?.skipped ?? '', r.checklistSummary?.total ?? '',
@@ -465,6 +544,7 @@ function help() {
   p('  bench start <agent> <milestone>        begin a milestone run')
   p('  bench end                              close run (interactive checklist + scores)')
   p('  bench log                              record one agent turn/message')
+  p('  bench pause                            toggle pause/resume (excludes time from duration)')
   p('  bench intervene "<note>"               record a human intervention')
   p('  bench tokens --in <n> | --out <n> | --all <n>  record token usage')
   p('  bench status                           show active run')
@@ -483,6 +563,7 @@ switch (cmd) {
   case 'start':     await start(args); break
   case 'end':       await end(); break
   case 'log':       log(); break
+  case 'pause':     pause(args); break
   case 'intervene': intervene(args); break
   case 'tokens':    tokens(args); break
   case 'status':    status(); break
